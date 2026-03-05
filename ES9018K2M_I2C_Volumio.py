@@ -41,8 +41,7 @@ WS_URL = "ws://localhost:3000/socket.io/?EIO=3&transport=websocket"
 # LOGGING SETUP (Journald only)
 # =========================
 
-# Настраиваем логи только на вывод в консоль (stdout)
-# systemd автоматически добавит их в journalctl
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(levelname)s: %(message)s",
