@@ -8,50 +8,112 @@ import logging
 import signal
 import sys
 import os
+import threading
+import RPi.GPIO as GPIO
 from websocket import WebSocketApp
 
 # =========================
-# CONFIG
+# CONFIGURATION
 # =========================
 
 I2C_BUS = 1
 DAC_ADDR = 0x48
 
-REG_MUTE = 0x07
-REG_VOL_L = 0x0F
-REG_VOL_R = 0x10
+# ES9018K2M register addresses
+REG_INPUT      = 0x01
+REG_MUTE       = 0x07
+REG_GPIO       = 0x08
+REG_CHMAP      = 0x0B
+REG_DPLL       = 0x0C
+REG_SOFT       = 0x0E
+REG_VOL_L      = 0x0F
+REG_VOL_R      = 0x10
 
+# RPi GPIO pins
+GPIO_I2S    = 17
+GPIO_SPDIF1 = 27
+GPIO_SPDIF2 = 4
+
+# Volumio WebSocket settings
 WS_URL = "ws://localhost:3000/socket.io/?EIO=3&transport=websocket"
-LOG_FILE = os.path.join(os.path.dirname(__file__), "es9018k2m_ws.log")
 
 # =========================
-# LOGGING
+# LOGGING SETUP (Journald only)
 # =========================
 
+# Настраиваем логи только на вывод в консоль (stdout)
+# systemd автоматически добавит их в journalctl
 logging.basicConfig(
-    filename=LOG_FILE,
     level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
+    format="%(levelname)s: %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)]
 )
-logging.getLogger().addHandler(logging.StreamHandler())
 
 # =========================
-# DAC CONTROLLER
+# DAC CONTROLLER CLASS
 # =========================
 
 class ES9018K2M:
     def __init__(self):
-        self.bus = smbus2.SMBus(I2C_BUS)
+        self.bus = None
+        self.lock = threading.Lock()
         self.volume = None
         self.mute = None
+        self.input_mode = None
         self.last_write = 0
+        self._connect_bus()
+
+    def _connect_bus(self):
+        try:
+            self.bus = smbus2.SMBus(I2C_BUS)
+            logging.info(f"Connected to I2C bus {I2C_BUS}")
+        except Exception as e:
+            logging.error(f"Failed to open I2C bus: {e}")
 
     def _write(self, reg, val):
-        now = time.time()
-        if now - self.last_write < 0.03:
-            time.sleep(0.03)
-        self.bus.write_byte_data(DAC_ADDR, reg, val)
-        self.last_write = time.time()
+        if not self.bus:
+            return
+        with self.lock:
+            now = time.time()
+            if now - self.last_write < 0.04:
+                time.sleep(0.04)
+            try:
+                self.bus.write_byte_data(DAC_ADDR, reg, val)
+                self.last_write = time.time()
+            except Exception as e:
+                logging.error(f"I2C Write Error [Reg {hex(reg)}]: {e}")
+
+    def init_dac(self):
+        """Initial hardware configuration"""
+        self._write(REG_GPIO, 0x88)
+        self._write(REG_DPLL, 0xAA)
+        self._write(REG_SOFT, 0x8A)
+        self._write(REG_INPUT, 0x80)
+        self._write(REG_CHMAP, 0x32)
+        self.input_mode = "i2s"
+        self._write(REG_MUTE, 0x80)
+        logging.info("DAC initialized: GPIO1/2 Inputs, DPLL 0xAA, Default=I2S")
+
+    def set_input_mode(self, mode):
+        if self.input_mode == mode:
+            return
+            
+        logging.info(f"Input switch triggered: {mode}")
+        self.set_mute(True)
+        time.sleep(0.1)
+
+        if mode == "i2s":
+            self._write(REG_INPUT, 0x80)
+        elif mode == "spdif1":
+            self._write(REG_CHMAP, 0x32)
+            self._write(REG_INPUT, 0x81)
+        elif mode == "spdif2":
+            self._write(REG_CHMAP, 0x42)
+            self._write(REG_INPUT, 0x81)
+
+        time.sleep(0.1)
+        self.set_mute(False)
+        self.input_mode = mode
 
     def set_volume(self, vol):
         if vol == self.volume:
@@ -60,7 +122,7 @@ class ES9018K2M:
         self._write(REG_VOL_L, att)
         self._write(REG_VOL_R, att)
         self.volume = vol
-        logging.info(f"Volume set to {vol}% (Reg: {hex(att)})")
+        logging.info(f"Volume: {vol}% (Reg: {hex(att)})")
 
     def set_mute(self, mute):
         if mute == self.mute:
@@ -70,67 +132,77 @@ class ES9018K2M:
         logging.info(f"Mute: {'ON' if mute else 'OFF'}")
 
 # =========================
-# WEBSOCKET HANDLERS
+# MONITORING THREAD
 # =========================
+
+def input_monitor_thread(dac_instance):
+    last_detected_mode = None
+    logging.info("Input monitor active")
+    
+    while True:
+        try:
+            current_mode = None
+            if GPIO.input(GPIO_I2S) == GPIO.LOW:
+                current_mode = "i2s"
+            elif GPIO.input(GPIO_SPDIF1) == GPIO.LOW:
+                current_mode = "spdif1"
+            elif GPIO.input(GPIO_SPDIF2) == GPIO.LOW:
+                current_mode = "spdif2"
+
+            if current_mode and current_mode != last_detected_mode:
+                dac_instance.set_input_mode(current_mode)
+                last_detected_mode = current_mode
+        except Exception as e:
+            logging.error(f"GPIO polling error: {e}")
+        
+        time.sleep(0.25)
+
+# =========================
+# WEBSOCKET & MAIN
+# =========================
+
+def on_message(ws, message):
+    try:
+        if not message.startswith("42"): return
+        payload = json.loads(message[2:])
+        if payload[0] == "pushState":
+            state = payload[1]
+            volume = state.get("volume")
+            mute = state.get("mute")
+            if volume is not None:
+                dac.set_volume(int(volume))
+            if mute is not None:
+                dac.set_mute(mute)
+    except:
+        pass
+
+def start_ws():
+    ws = WebSocketApp(WS_URL, on_message=on_message)
+    ws.run_forever(ping_interval=10, ping_timeout=5)
 
 dac = ES9018K2M()
 
-def on_message(ws, message):
-    # socket.io framing
-    if not message.startswith("42"):
-        return
-
-    payload = json.loads(message[2:])
-    if payload[0] != "pushState":
-        return
-
-    state = payload[1]
-    status = state.get("status")
-    volume = state.get("volume")
-    mute = state.get("mute")
-
-    if status != "play":
-        dac.set_volume(0)
-        return
-
-    if isinstance(volume, int):
-        dac.set_volume(volume)
-
-    if isinstance(mute, bool):
-        dac.set_mute(mute)
-
-def on_open(ws):
-    logging.info("WebSocket connected to Volumio")
-
-def on_close(ws, *_):
-    logging.warning("WebSocket closed, reconnecting...")
-    time.sleep(2)
-    start_ws()
-
-def on_error(ws, error):
-    logging.error(f"WebSocket error: {error}")
-
-# =========================
-# MAIN
-# =========================
-
-def start_ws():
-    ws = WebSocketApp(
-        WS_URL,
-        on_message=on_message,
-        on_open=on_open,
-        on_close=on_close,
-        on_error=on_error
-    )
-    ws.run_forever(ping_interval=10, ping_timeout=5)
-
-def stop(sig, frame):
-    logging.info("Stopping ES9018K2M controller")
+def stop_handler(sig, frame):
+    logging.info("Shutting down controller...")
+    GPIO.cleanup()
     sys.exit(0)
 
-signal.signal(signal.SIGTERM, stop)
-signal.signal(signal.SIGINT, stop)
+signal.signal(signal.SIGTERM, stop_handler)
+signal.signal(signal.SIGINT, stop_handler)
 
 if __name__ == "__main__":
-    logging.info("ES9018K2M WebSocket controller started")
-    start_ws()
+    GPIO.setwarnings(False)
+    GPIO.setmode(GPIO.BCM)
+    for pin in [GPIO_I2S, GPIO_SPDIF1, GPIO_SPDIF2]:
+        GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+    
+    dac.init_dac()
+    
+    monitor = threading.Thread(target=input_monitor_thread, args=(dac,), daemon=True)
+    monitor.start()
+    
+    while True:
+        try:
+            start_ws()
+        except Exception:
+            time.sleep(5)
