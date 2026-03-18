@@ -1,7 +1,7 @@
 begin
 prog = irexec
 button = KEY_PLAY
-config = /usr/local/bin/volumio toggle
+config = /usr/local/bin/volumio volume mute
 end
 begin
 prog = irexec
@@ -26,5 +26,5 @@ end
 begin
 prog = irexec
 button = KEY_MENU
-config = /usr/local/bin/volumio volume mute
+config = if [ -f /tmp/remote_lock ]; then rm /tmp/remote_lock; else touch /tmp/remote_lock; fi
 end
