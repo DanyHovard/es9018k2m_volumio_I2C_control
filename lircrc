@@ -16,12 +16,12 @@ end
 begin
 prog = irexec
 button = KEY_UP
-config = /usr/local/bin/volumio volume plus
+config = /usr/local/bin/volumio volume plus; /usr/local/bin/volumio volume plus; /usr/local/bin/volumio volume plus; /usr/local/bin/volumio volume plus; /usr/local/bin/volumio volume plus
 end
 begin
 prog = irexec
 button = KEY_DOWN
-config = /usr/local/bin/volumio volume minus
+config = /usr/local/bin/volumio volume minus; /usr/local/bin/volumio volume minus; /usr/local/bin/volumio volume minus; /usr/local/bin/volumio volume minus; /usr/local/bin/volumio volume minus
 end
 begin
 prog = irexec
