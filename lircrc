@@ -16,11 +16,19 @@ end
 begin
 prog = irexec
 button = KEY_UP
+# for continuous holding button
+# repeat = 1
+# delay = 2
+# config = /usr/local/bin/volumio volume plus
 config = /usr/local/bin/volumio volume plus; /usr/local/bin/volumio volume plus; /usr/local/bin/volumio volume plus; /usr/local/bin/volumio volume plus; /usr/local/bin/volumio volume plus
 end
 begin
 prog = irexec
 button = KEY_DOWN
+# for continuous holding button
+# repeat = 1
+# delay = 2
+# config = /usr/local/bin/volumio volume minus
 config = /usr/local/bin/volumio volume minus; /usr/local/bin/volumio volume minus; /usr/local/bin/volumio volume minus; /usr/local/bin/volumio volume minus; /usr/local/bin/volumio volume minus
 end
 begin
